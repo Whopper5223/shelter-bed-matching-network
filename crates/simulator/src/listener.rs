@@ -7,9 +7,15 @@ use tonic::transport::Channel;
 use crate::stats::LatencyStats;
 
 /// Subscribes to the live availability stream (the same one real
-/// caseworkers would use) and records end-to-end latency for every update:
-/// `delivered_timestamp_ms - event_timestamp_ms`, i.e. time from the
-/// original intake-terminal event to this subscriber receiving it.
+/// caseworkers would use) and records end-to-end latency for every update,
+/// as `(this process's clock on receipt) - event_timestamp_ms`. This
+/// deliberately does *not* use the update's own `delivered_timestamp_ms`:
+/// that field is stamped by matching-engine at broadcast-send time, so
+/// subtracting it would only measure "intake -> Kafka -> engine", missing
+/// the gateway proxy hop and actual network delivery to this subscriber --
+/// the rest of the path the "sub-second visibility" claim is about.
+/// docker-compose and kind share a clock across containers/pods, so this
+/// comparison is valid without NTP-syncing anything extra.
 ///
 /// Retries connecting indefinitely with a short backoff: in Kubernetes all
 /// pods can start at the same instant, so caseworker-gateway may not be
@@ -34,8 +40,8 @@ pub async fn run(mut client: CaseworkerServiceClient<Channel>, stats: Arc<Latenc
         loop {
             match stream.message().await {
                 Ok(Some(update)) => {
-                    let latency_ms = update.delivered_timestamp_ms - update.event_timestamp_ms;
-                    stats.record(latency_ms);
+                    let received_at_ms = chrono::Utc::now().timestamp_millis();
+                    stats.record(received_at_ms - update.event_timestamp_ms);
                 }
                 Ok(None) => return,
                 Err(err) => {

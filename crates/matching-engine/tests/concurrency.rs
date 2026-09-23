@@ -50,25 +50,25 @@ async fn concurrent_referrals_never_double_book_a_bed() {
         }));
     }
 
-    // NOTE on what we assert here and why: a task's own `submit_referral`
-    // call can legitimately come back `Pending` even though its referral
-    // gets matched moments later by a *different* task's concurrent
-    // allocation attempt (allocate_for_bed always awards a freed-up bed to
-    // whichever pending referral is globally top-priority, not necessarily
-    // the one that triggered the check). That is correct, intended
-    // behavior, not a bug -- so we don't assert on each call's own return
-    // value. What must hold is the actual database state once every task
-    // has finished, which is what the checks below verify.
+    // Each call's own return value must accurately reflect the final
+    // database state, even when a *different* concurrent call is the one
+    // whose allocate_for_bed actually assigned this referral's bed
+    // (submit_referral re-checks before reporting Pending specifically to
+    // guarantee this -- see resolve_final_outcome).
     let mut locally_matched = 0usize;
     let mut locally_pending = 0usize;
     for handle in handles {
-        match handle.await.expect("task panicked") {
+        let (outcome, _side_allocations) = handle.await.expect("task panicked");
+        match outcome {
             SubmitOutcome::Matched(_) => locally_matched += 1,
             SubmitOutcome::Pending { .. } => locally_pending += 1,
         }
     }
-    assert_eq!(locally_matched + locally_pending, NUM_REFERRALS);
-    assert!(locally_matched <= NUM_BEDS);
+    assert_eq!(
+        locally_matched, NUM_BEDS,
+        "every call's own return value must reflect the true final outcome"
+    );
+    assert_eq!(locally_pending, NUM_REFERRALS - NUM_BEDS);
 
     let (active_reservations,): (i64,) =
         sqlx::query_as("SELECT count(*) FROM reservations WHERE status = 'active'")

@@ -106,15 +106,21 @@ CREATE UNIQUE INDEX reservations_referral_active_uq ON reservations(referral_id)
 
 - [`tests/concurrency.rs`](crates/matching-engine/tests/concurrency.rs): 50
   referrals submitted concurrently for 10 beds. Asserts exactly 10 active
-  reservations, 10 distinct beds, 10 matched referrals, system-wide — a
-  task's own RPC response can legitimately say "pending" even though its
-  referral gets matched moments later by a *different* concurrent
-  allocation, so the test checks final database state, not each task's own
-  return value.
+  reservations, 10 distinct beds, 10 matched referrals system-wide, *and*
+  that every individual call's own return value agrees with that (see
+  `resolve_final_outcome` in `matcher.rs`: a referral can be matched by a
+  *different* concurrent call's allocation, so `submit_referral` re-checks
+  its own referral's true state before ever reporting "pending").
 - [`tests/priority.rs`](crates/matching-engine/tests/priority.rs): a
   low-vulnerability referral arrives first and a high-vulnerability one
   arrives second; when a bed frees up, the high-vulnerability referral wins
   it — arrival order doesn't matter, vulnerability does.
+- [`tests/reservation_lifecycle.rs`](crates/matching-engine/tests/reservation_lifecycle.rs):
+  a no-show or a maintenance hold can send a bed back to `available` while
+  it still holds an active reservation (the client never checked in).
+  Asserts that reservation is released and its referral re-pended, rather
+  than the next allocation attempt on that bed failing against the
+  `reservations_bed_active_uq` unique index.
 
 Run them yourself:
 
@@ -131,8 +137,23 @@ cargo test --workspace
   redelivery by `event_id`, and a per-bed monotonic `sequence` rejects
   anything at or below what's already been applied (out-of-order delivery).
 - The Kafka offset is committed only *after* the Postgres transaction that
-  applied the event has committed — a crash between the two just means the
-  event is redelivered and safely re-applied as a no-op.
+  applied the event has committed. A failing event is **retried in place
+  with backoff, not skipped**: a Kafka partition's committed offset is a
+  single high-water mark, not a sparse set of acked messages, so skipping
+  one message and later committing a *later* one would silently move the
+  committed position past the one that failed — it would never actually be
+  redelivered. Blocking the partition to retry is the correct trade for
+  strict per-shelter ordering; it does mean one stuck event blocks that
+  shelter's (and, since one task here serves every assigned partition,
+  every other shelter's) further events until it resolves. A production
+  version would likely give each partition its own consumer task, or add a
+  dead-letter topic, to avoid that head-of-line blocking.
+- Every event -- including a `Duplicate` or `Stale` one -- still triggers an
+  allocation attempt on its bed. That's a cheap no-op if the bed isn't
+  actually `available`, and it closes a real crash-recovery gap: without it,
+  a crash between `apply_bed_status_event`'s commit and the allocation call
+  (or between that call and the offset commit) could leave a bed sitting
+  `available` forever with no referral ever considered for it again.
 
 See [`kafka_consumer.rs`](crates/matching-engine/src/kafka_consumer.rs).
 
@@ -143,38 +164,35 @@ docker compose up --build
 ```
 
 This starts Postgres, Kafka (KRaft, single node), matching-engine,
-intake-ingestion, and caseworker-gateway, then runs the `simulator` once:
-it seeds 12 simulated shelters (96 beds), plays each bed's intake terminal
+intake-ingestion, and caseworker-gateway (each gated on the previous one's
+health check, so the simulator can't start seeding before matching-engine
+has finished its startup migration), then runs the `simulator` once: it
+seeds 12 simulated shelters (96 beds), plays each bed's intake terminal
 (random check-in/check-out events over gRPC), plays a stream of caseworkers
 submitting referrals with randomized eligibility and vulnerability scores,
 and subscribes to the live availability stream to measure real end-to-end
-latency (intake terminal → Kafka → matching engine → gateway stream →
-subscriber).
+latency. Latency is computed in the simulator itself, as `(local clock at
+receipt) - event_timestamp_ms`, so it captures the whole path -- intake
+terminal → Kafka → matching engine → gateway proxy → this subscriber -- not
+just the server-side leg up to matching-engine's broadcast send.
 
-Measured on a single-node local run, 12 shelters / 96 beds, 30s of bed
-events + 30s of referrals (`docker compose run --rm simulator`):
-
-First run against a cold cluster:
-
-```
-count=1797 avg_ms=419.6 p50_ms=11 p99_ms=4701 max_ms=5081
-referral simulation complete: submitted=32 matched=21
-```
-
-Second run, same cluster, now warm:
+Measured with a genuinely cold `docker compose down -v && docker compose up
+--build`, 12 shelters / 96 beds, 30s of bed events + 30s of referrals:
 
 ```
-count=1829 avg_ms=10.8 p50_ms=10 p99_ms=23 max_ms=117
-referral simulation complete: submitted=35 matched=30
+seeded simulated shelters and beds num_shelters=12 num_beds=96
+referral simulation complete submitted=38 matched=23
+end-to-end availability update latency count=1830 avg_ms=407.6 p50_ms=10 p99_ms=4723 max_ms=5089
 ```
 
-The first run's p99/max are a one-time cold-start artifact, not steady
-state: Kafka doesn't create the `bed-events` topic until the first message
-is produced, so the very first handful of events pay a topic-creation delay
-while matching-engine's consumer retries `UnknownTopicOrPartition`. Once the
-topic exists, end-to-end latency (intake terminal → Kafka → matching engine
-→ gateway stream → subscriber) sits at p50 10ms / p99 23ms / max 117ms —
-sub-second by roughly two orders of magnitude.
+p50 is sub-second by roughly two orders of magnitude. The p99/max are a
+one-time cold-start artifact, not steady state: Kafka doesn't create the
+`bed-events` topic until the first message is produced, so the first
+handful of events pay a topic-creation delay while matching-engine's
+consumer retries `UnknownTopicOrPartition` (visible in its logs). A second
+run against the now-warm cluster (`docker compose run --rm simulator`)
+keeps essentially every update in single-digit milliseconds: `p50_ms=10
+p99_ms=23 max_ms=117`.
 
 ## Deploying to Kubernetes
 
@@ -200,30 +218,51 @@ kubectl -n shelterbed logs job/simulator -f
 The HPA needs `metrics-server` installed in the cluster to actually act on
 CPU utilization; the manifest applies cleanly either way.
 
-Verified on a real local `kind` cluster (all 6 pods starting cold at the
-same instant via a single `kubectl apply -f k8s/`):
+Unlike docker-compose's staggered `depends_on`, a single `kubectl apply -f
+k8s/` starts every pod at once -- there's no ordering guarantee at all. Two
+real races follow from that, and both are handled explicitly rather than
+worked around by luck:
+
+- The simulator seeds fixture data directly via its own DB connection
+  without running migrations itself, so it can reach Postgres before
+  matching-engine's startup migration has created the schema
+  (`relation "shelters" does not exist`). The simulator Job's pod has an
+  `initContainer` that blocks on `matching-engine`'s port specifically --
+  which only starts listening after its migration succeeds (see
+  `crates/matching-engine/src/lib.rs`) -- so this can't happen.
+- The simulator's very first gRPC connection can race ahead of
+  caseworker-gateway accepting connections. Its stream listener retries
+  with backoff instead of giving up on the first failure (see
+  [`listener.rs`](crates/simulator/src/listener.rs)).
+
+Verified on a freshly created local `kind` cluster (`kind create cluster` →
+load the 4 images → one `kubectl apply -f k8s/`, nothing pre-warmed):
 
 ```
 NAME                                  READY   STATUS      RESTARTS   AGE
-caseworker-gateway-648cdc4558-v6697   1/1     Running     0          5m32s
-intake-ingestion-5b6f9ccc5c-mzhtf     1/1     Running     0          5m32s
-kafka-7dfb4fc48-429gz                 1/1     Running     0          5m32s
-matching-engine-85b9b54bc-r5rlf       1/1     Running     0          5m32s
-postgres-5954fd6dc5-pzptn             1/1     Running     0          5m32s
-simulator-wdvnf                       0/1     Completed   0          38s
+caseworker-gateway-648cdc4558-cnh7l   1/1     Running     0          82s
+intake-ingestion-5b6f9ccc5c-nccd6     1/1     Running     0          82s
+kafka-7dfb4fc48-cvvgq                 1/1     Running     0          82s
+matching-engine-85b9b54bc-jqhfx       1/1     Running     0          82s
+postgres-5954fd6dc5-f5mfh             1/1     Running     0          82s
+simulator-gq76m                       0/1     Completed   0          82s
+
+# simulator pod's initContainer log -- the migration-race guard actually firing:
+waiting for matching-engine
+waiting for matching-engine
 
 # simulator job logs:
 seeded simulated shelters and beds num_shelters=12 num_beds=96
-referral simulation complete submitted=35 matched=33
-end-to-end availability update latency count=1828 avg_ms=10.7 p50_ms=9 p99_ms=42 max_ms=150
+referral simulation complete submitted=34 matched=21
+end-to-end availability update latency count=1838 avg_ms=430.4 p50_ms=11 p99_ms=4752 max_ms=23276
 ```
 
-(All pods starting simultaneously in Kubernetes -- unlike docker-compose's
-staggered `depends_on` -- means the simulator's very first connection
-attempt to caseworker-gateway can race ahead of that pod being ready. Its
-gRPC stream listener retries with backoff rather than giving up on the
-first failure, which is what makes this cold-start case work cleanly; see
-[`listener.rs`](crates/simulator/src/listener.rs).)
+And the actual database state after that run, confirming no double-booking
+under a real cold-cluster race, not just in the unit-test harness:
+
+```
+active_reservations = 17,  distinct_beds = 17,  beds.status='reserved' = 17
+```
 
 ## Project layout
 

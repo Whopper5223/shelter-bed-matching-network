@@ -57,6 +57,16 @@ services:
       RUST_LOG: "info"
     ports:
       - "50051:50051"
+    healthcheck:
+      # Doubles as the migration-race guard: matching-engine only starts
+      # listening after common::db::run_migrations succeeds (see lib.rs), so
+      # anything that waits on this being healthy is guaranteed the schema
+      # already exists -- notably the simulator, which seeds data directly
+      # via its own connection and doesn't run migrations itself.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50051' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   intake-ingestion:
     build:
@@ -73,6 +83,11 @@ services:
       RUST_LOG: "info"
     ports:
       - "50052:50052"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50052' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   caseworker-gateway:
     build:
@@ -80,13 +95,19 @@ services:
       dockerfile: docker/Dockerfile
       target: caseworker-gateway
     depends_on:
-      - matching-engine
+      matching-engine:
+        condition: service_healthy
     environment:
       MATCHING_ENGINE_ADDR: "http://matching-engine:50051"
       GRPC_ADDR: "0.0.0.0:50053"
       RUST_LOG: "info"
     ports:
       - "50053:50053"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50053' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   simulator:
     build:
@@ -94,8 +115,12 @@ services:
       dockerfile: docker/Dockerfile
       target: simulator
     depends_on:
-      - intake-ingestion
-      - caseworker-gateway
+      matching-engine:
+        condition: service_healthy
+      intake-ingestion:
+        condition: service_healthy
+      caseworker-gateway:
+        condition: service_healthy
     environment:
       DATABASE_URL: "postgres://shelterbed:shelterbed@postgres:5432/shelterbed"
       INTAKE_ADDR: "http://intake-ingestion:50052"

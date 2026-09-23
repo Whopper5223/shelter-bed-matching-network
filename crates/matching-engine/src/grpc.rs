@@ -37,7 +37,7 @@ impl MatchingService for MatchingServiceImpl {
             needs_ada_accessible: criteria.needs_ada_accessible,
         };
 
-        let outcome = matcher::submit_referral(
+        let (outcome, side_allocations) = matcher::submit_referral(
             &self.state.pool,
             &req.caseworker_id,
             &req.region,
@@ -46,6 +46,21 @@ impl MatchingService for MatchingServiceImpl {
             criteria.family_size,
         )
         .await?;
+
+        // Publish every allocation this call caused, including ones awarded
+        // to a different (higher-priority) referral than the one that
+        // triggered the search -- otherwise those beds would go quiet to
+        // live subscribers even though they just got reserved.
+        for result in &side_allocations {
+            notify::publish_bed_update(
+                &self.state,
+                result.shelter_id,
+                result.bed_id,
+                BedStatus::Reserved,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?;
+        }
 
         match outcome {
             SubmitOutcome::Matched(result) => {

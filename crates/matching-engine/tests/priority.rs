@@ -28,12 +28,12 @@ async fn higher_vulnerability_referral_wins_over_one_that_arrived_first() {
     let bed_id = support::insert_bed(&pool, shelter_id, "general", false, false, false).await;
 
     // Take the only bed so both referrals below start out pending.
-    let blocker = matcher::submit_referral(&pool, "blocker", REGION, general_needs(), 1, 1)
+    let (blocker, _) = matcher::submit_referral(&pool, "blocker", REGION, general_needs(), 1, 1)
         .await
         .unwrap();
     assert!(matches!(blocker, SubmitOutcome::Matched(_)));
 
-    let low = matcher::submit_referral(&pool, "low-vuln", REGION, general_needs(), 10, 1)
+    let (low, _) = matcher::submit_referral(&pool, "low-vuln", REGION, general_needs(), 10, 1)
         .await
         .unwrap();
     let low_id = match low {
@@ -41,7 +41,7 @@ async fn higher_vulnerability_referral_wins_over_one_that_arrived_first() {
         other => panic!("expected Pending, got {other:?}"),
     };
 
-    let high = matcher::submit_referral(&pool, "high-vuln", REGION, general_needs(), 90, 1)
+    let (high, _) = matcher::submit_referral(&pool, "high-vuln", REGION, general_needs(), 90, 1)
         .await
         .unwrap();
     let high_id = match high {

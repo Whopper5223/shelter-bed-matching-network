@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::model::BedStatus;
 use common::proto;
@@ -14,9 +15,17 @@ use crate::state::AppState;
 
 /// Consumes `bed-events`, keyed by shelter_id so a shelter's events stay
 /// ordered within a partition. Offsets are committed manually, only after
-/// the corresponding Postgres transaction has committed -- if the process
-/// crashes between applying an event and committing its offset, the event
-/// is redelivered and re-applied safely because apply is idempotent.
+/// the corresponding Postgres transaction has committed.
+///
+/// A failing event is retried in place with backoff, not skipped: Kafka's
+/// committed offset is a single per-partition high-water mark, not a sparse
+/// set of acked messages, so skipping ahead and later committing a *later*
+/// message's offset would silently move the committed position past the one
+/// that failed -- it would never be redelivered. Retrying in place does mean
+/// a stuck event blocks this partition (and, since one consumer task here
+/// serves every assigned partition, other shelters' events too); a
+/// production version would likely give each partition its own consumer
+/// task, or a dead-letter topic, to avoid that head-of-line blocking.
 pub async fn run(
     state: Arc<AppState>,
     brokers: &str,
@@ -39,9 +48,14 @@ pub async fn run(
                 if let Some(payload) = msg.payload() {
                     match proto::BedStatusEvent::decode(payload) {
                         Ok(event) => {
-                            if let Err(err) = handle_event(&state, &event).await {
-                                tracing::error!(%err, event_id = %event.event_id, "failed to apply bed status event, will retry on redelivery");
-                                continue; // skip commit -- this message will be redelivered
+                            let mut attempt = 0u32;
+                            while let Err(err) = handle_event(&state, &event).await {
+                                attempt += 1;
+                                tracing::error!(%err, event_id = %event.event_id, attempt, "failed to apply bed status event, retrying in place");
+                                tokio::time::sleep(Duration::from_millis(
+                                    200 * u64::from(attempt.min(25)),
+                                ))
+                                .await;
                             }
                         }
                         Err(err) => {
@@ -69,39 +83,40 @@ async fn handle_event(state: &Arc<AppState>, event: &proto::BedStatusEvent) -> a
         matcher::apply_bed_status_event(&state.pool, event_id, bed_id, status, event.sequence)
             .await?;
 
-    match outcome {
-        ApplyOutcome::Applied {
-            shelter_id,
-            became_available,
-        } => {
-            let mut final_status = status;
-            if became_available
-                && matcher::allocate_for_bed(&state.pool, bed_id)
-                    .await?
-                    .is_some()
-            {
-                // Immediately claimed by a waiting referral -- publish the
-                // final state rather than a misleading momentary "available".
-                final_status = BedStatus::Reserved;
-            }
-            notify::publish_bed_update(
-                state,
-                shelter_id,
-                bed_id,
-                final_status,
-                event.occurred_at_ms,
-            )
-            .await?;
-        }
-        ApplyOutcome::Duplicate => {
-            tracing::debug!(event_id = %event.event_id, "duplicate event, skipping");
-        }
-        ApplyOutcome::Stale => {
-            tracing::debug!(event_id = %event.event_id, sequence = event.sequence, "stale/out-of-order event, skipping");
-        }
+    let applied_shelter_id = match outcome {
         ApplyOutcome::UnknownBed => {
             tracing::warn!(bed_id = %event.bed_id, "event for unknown bed, skipping");
+            return Ok(());
         }
+        ApplyOutcome::Duplicate => {
+            tracing::debug!(event_id = %event.event_id, "duplicate event, still checking for a strandable allocation");
+            None
+        }
+        ApplyOutcome::Stale => {
+            tracing::debug!(event_id = %event.event_id, sequence = event.sequence, "stale/out-of-order event, still checking for a strandable allocation");
+            None
+        }
+        ApplyOutcome::Applied { shelter_id, .. } => Some(shelter_id),
+    };
+
+    // Always attempt an allocation pass on this bed, even for a
+    // Duplicate/Stale outcome: it's a cheap no-op (an immediate rollback)
+    // if the bed isn't currently `available`, and it closes a real gap
+    // where a crash between apply_bed_status_event's commit and this call
+    // -- or between this call and the offset commit below -- could
+    // otherwise strand a bed as `available` forever, with no pending
+    // referral ever considered for it again.
+    if let Some(result) = matcher::allocate_for_bed(&state.pool, bed_id).await? {
+        notify::publish_bed_update(
+            state,
+            result.shelter_id,
+            result.bed_id,
+            BedStatus::Reserved,
+            event.occurred_at_ms,
+        )
+        .await?;
+    } else if let Some(shelter_id) = applied_shelter_id {
+        notify::publish_bed_update(state, shelter_id, bed_id, status, event.occurred_at_ms).await?;
     }
 
     Ok(())

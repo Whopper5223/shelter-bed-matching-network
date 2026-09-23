@@ -23,6 +23,13 @@ pub enum SubmitOutcome {
 /// -- so a referral submitted a second ago cannot jump ahead of one with a
 /// higher vulnerability score that is already waiting. This is what makes
 /// matching priority-ordered rather than first-come-first-served.
+///
+/// Returns the outcome for *this* referral, plus every allocation this call
+/// caused as a side effect (candidate beds that ended up awarded to some
+/// *other*, higher-priority pending referral instead). The caller should
+/// publish an availability update for each of those too -- otherwise a bed
+/// this call reserved for someone else would sit invisible to live
+/// subscribers.
 #[allow(clippy::too_many_arguments)]
 pub async fn submit_referral(
     pool: &PgPool,
@@ -31,7 +38,7 @@ pub async fn submit_referral(
     needs: ReferralNeeds,
     vulnerability_score: i32,
     family_size: i32,
-) -> Result<SubmitOutcome, AppError> {
+) -> Result<(SubmitOutcome, Vec<AllocationResult>), AppError> {
     let referral_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO referrals
@@ -51,6 +58,8 @@ pub async fn submit_referral(
     .bind(vulnerability_score)
     .execute(pool)
     .await?;
+
+    let mut side_allocations = Vec::new();
 
     // Bounded: at most one iteration per matching bed that exists, so this
     // always terminates even under heavy concurrent contention.
@@ -76,21 +85,58 @@ pub async fn submit_referral(
         .await?;
 
         let Some((bed_id,)) = candidate else {
-            return Ok(SubmitOutcome::Pending { referral_id });
+            let outcome = resolve_final_outcome(pool, referral_id).await?;
+            return Ok((outcome, side_allocations));
         };
 
         match allocate_for_bed(pool, bed_id).await? {
             Some(result) if result.referral_id == referral_id => {
-                return Ok(SubmitOutcome::Matched(result));
+                return Ok((SubmitOutcome::Matched(result), side_allocations));
             }
             // Bed went to a higher-priority referral, or was taken /
             // temporarily lock-contended between the two queries above --
-            // either way, try the next candidate.
-            _ => continue,
+            // either way, record it (if it's a real allocation) and try the
+            // next candidate.
+            Some(result) => {
+                side_allocations.push(result);
+            }
+            None => {}
         }
     }
 
-    Ok(SubmitOutcome::Pending { referral_id })
+    let outcome = resolve_final_outcome(pool, referral_id).await?;
+    Ok((outcome, side_allocations))
+}
+
+/// Re-reads this referral's true current state before reporting `Pending`.
+/// Necessary because, under concurrency, this referral can be matched by a
+/// *different* call's `allocate_for_bed` (one triggered by another
+/// referral's search, or by a bed becoming available) at any point --
+/// including after this call's own search already gave up. Without this
+/// check, a caseworker could be told "no bed" for a referral that, in the
+/// database, already holds one.
+async fn resolve_final_outcome(
+    pool: &PgPool,
+    referral_id: Uuid,
+) -> Result<SubmitOutcome, AppError> {
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT reservations.bed_id, beds.shelter_id
+         FROM reservations
+         JOIN beds ON beds.id = reservations.bed_id
+         WHERE reservations.referral_id = $1 AND reservations.status = 'active'",
+    )
+    .bind(referral_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(match row {
+        Some((bed_id, shelter_id)) => SubmitOutcome::Matched(AllocationResult {
+            bed_id,
+            shelter_id,
+            referral_id,
+        }),
+        None => SubmitOutcome::Pending { referral_id },
+    })
 }
 
 /// The single allocation routine, called both when a referral is submitted
@@ -277,9 +323,17 @@ pub async fn apply_bed_status_event(
         .execute(&mut *tx)
         .await?;
 
-    // Reservation lifecycle bookkeeping. Cosmetic: the no-double-booking
-    // guarantee rests entirely on the partial unique indexes plus the
-    // locking above, not on this.
+    // Reservation lifecycle bookkeeping. The no-double-booking guarantee
+    // itself rests entirely on the partial unique indexes plus the locking
+    // above, not on this -- but it IS load-bearing for availability: if a
+    // bed goes back to `available` (or into `maintenance`) while it still
+    // holds an active/checked_in reservation -- a no-show, a cancellation
+    // before check-in, or a maintenance hold -- that reservation has to be
+    // released here, or the next allocate_for_bed on this bed hits the
+    // unique index as a real error instead of proceeding. The displaced
+    // referral goes back to `pending` (keeping its original created_at, so
+    // it doesn't lose its place in line) so it can be matched to a
+    // different bed.
     if new_status == BedStatus::Occupied {
         sqlx::query(
             "UPDATE reservations SET status = 'checked_in' WHERE bed_id = $1 AND status = 'active'",
@@ -287,13 +341,24 @@ pub async fn apply_bed_status_event(
         .bind(bed_id)
         .execute(&mut *tx)
         .await?;
-    } else if new_status == BedStatus::Available {
-        sqlx::query(
-            "UPDATE reservations SET status = 'released' WHERE bed_id = $1 AND status = 'checked_in'",
+    } else if matches!(new_status, BedStatus::Available | BedStatus::Maintenance) {
+        let released: Option<(Uuid,)> = sqlx::query_as(
+            "UPDATE reservations SET status = 'released'
+             WHERE bed_id = $1 AND status IN ('active', 'checked_in')
+             RETURNING referral_id",
         )
         .bind(bed_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+
+        if let Some((referral_id,)) = released {
+            sqlx::query(
+                "UPDATE referrals SET status = 'pending' WHERE id = $1 AND status = 'matched'",
+            )
+            .bind(referral_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx.commit().await?;

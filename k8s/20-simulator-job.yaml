@@ -8,6 +8,25 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Jobs and Deployments start independently in Kubernetes -- nothing
+      # blocks this pod on the others being ready. The simulator seeds data
+      # directly via its own DB connection without running migrations
+      # itself, so without this it can race matching-engine's startup
+      # migration (relation "shelters" does not exist, SQLSTATE 42P01).
+      # Waiting for matching-engine's port specifically is enough: it only
+      # starts listening after migrations succeed (see
+      # crates/matching-engine/src/lib.rs).
+      initContainers:
+        - name: wait-for-services
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres 5432; do echo "waiting for postgres"; sleep 2; done
+              until nc -z matching-engine 50051; do echo "waiting for matching-engine"; sleep 2; done
+              until nc -z intake-ingestion 50052; do echo "waiting for intake-ingestion"; sleep 2; done
+              until nc -z caseworker-gateway 50053; do echo "waiting for caseworker-gateway"; sleep 2; done
       containers:
         - name: simulator
           image: resproj-simulator:latest
