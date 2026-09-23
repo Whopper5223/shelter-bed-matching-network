@@ -1,0 +1,9 @@
+/target
+**/target
+/.cargo
+/.claude
+.DS_Store
+.env
+*.log
+.idea/
+.vscode/

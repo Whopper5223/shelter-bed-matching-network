@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: simulator
+  namespace: shelterbed
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: simulator
+          image: resproj-simulator:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: shelterbed-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: shelterbed-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shelterbed-secrets
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: INTAKE_ADDR
+              value: "http://intake-ingestion:50052"
+            - name: GATEWAY_ADDR
+              value: "http://caseworker-gateway:50053"
+            - name: NUM_SHELTERS
+              value: "12"
+            - name: BEDS_PER_SHELTER
+              value: "8"
+            - name: SIMULATION_SECONDS
+              value: "30"
+            - name: RUST_LOG
+              value: "info"

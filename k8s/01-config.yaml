@@ -1,0 +1,22 @@
+# Demo-only credentials for a local kind/minikube cluster. Never reuse this
+# pattern for a real deployment -- a real one pulls the password from a
+# proper secret manager (or at minimum a Secret populated out-of-band), not
+# a value committed to git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shelterbed-config
+  namespace: shelterbed
+data:
+  POSTGRES_DB: "shelterbed"
+  POSTGRES_USER: "shelterbed"
+  KAFKA_TOPIC: "bed-events"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shelterbed-secrets
+  namespace: shelterbed
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "shelterbed"

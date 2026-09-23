@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matching-engine
+  namespace: shelterbed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: matching-engine
+  template:
+    metadata:
+      labels:
+        app: matching-engine
+    spec:
+      containers:
+        - name: matching-engine
+          image: resproj-matching-engine:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+          # $(VAR) interpolation below only sees vars defined earlier in this
+          # same `env:` list -- not `envFrom` entries -- so POSTGRES_* are
+          # pulled in explicitly via valueFrom rather than envFrom.
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: shelterbed-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: shelterbed-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shelterbed-secrets
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: KAFKA_BROKERS
+              value: "kafka:9092"
+            - name: KAFKA_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: shelterbed-config
+                  key: KAFKA_TOPIC
+            - name: GRPC_ADDR
+              value: "0.0.0.0:50051"
+            - name: RUST_LOG
+              value: "info"
+          readinessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matching-engine
+  namespace: shelterbed
+spec:
+  selector:
+    app: matching-engine
+  ports:
+    - port: 50051
+      targetPort: 50051

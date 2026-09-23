@@ -1,0 +1,15 @@
+[package]
+name = "caseworker-gateway"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

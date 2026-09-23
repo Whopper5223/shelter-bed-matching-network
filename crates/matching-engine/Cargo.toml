@@ -1,0 +1,26 @@
+[package]
+name = "matching-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+sqlx = { workspace = true }
+rdkafka = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

@@ -1,0 +1,59 @@
+# Dev-only: a single non-persistent Postgres pod for local kind/minikube
+# demos. A real deployment points DATABASE_URL at a managed Postgres
+# instance (RDS, Cloud SQL, etc.) or a proper operator-managed StatefulSet
+# with persistent volumes, not this.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: shelterbed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: shelterbed-config
+            - secretRef:
+                name: shelterbed-secrets
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "shelterbed"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: shelterbed
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

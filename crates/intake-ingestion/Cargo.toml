@@ -1,0 +1,16 @@
+[package]
+name = "intake-ingestion"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+rdkafka = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

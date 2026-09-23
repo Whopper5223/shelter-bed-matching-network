@@ -1,0 +1,20 @@
+[package]
+name = "common"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

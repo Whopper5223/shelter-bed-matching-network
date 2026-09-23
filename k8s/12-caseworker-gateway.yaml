@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caseworker-gateway
+  namespace: shelterbed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caseworker-gateway
+  template:
+    metadata:
+      labels:
+        app: caseworker-gateway
+    spec:
+      containers:
+        - name: caseworker-gateway
+          image: resproj-caseworker-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50053
+          env:
+            - name: MATCHING_ENGINE_ADDR
+              value: "http://matching-engine:50051"
+            - name: GRPC_ADDR
+              value: "0.0.0.0:50053"
+            - name: RUST_LOG
+              value: "info"
+          readinessProbe:
+            tcpSocket:
+              port: 50053
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: caseworker-gateway
+  namespace: shelterbed
+spec:
+  selector:
+    app: caseworker-gateway
+  ports:
+    - port: 50053
+      targetPort: 50053
