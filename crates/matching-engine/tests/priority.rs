@@ -19,7 +19,12 @@ fn general_needs() -> ReferralNeeds {
 /// first and waits, a high-vulnerability referral arrives second, and when
 /// a bed frees up the high-vulnerability referral wins it -- even though it
 /// asked second.
+// All DB-touching integration tests share one real Postgres instance with
+// no per-test isolation beyond a region name -- file_serial (not plain
+// serial, since each tests/*.rs file is a separate binary/process) makes
+// sure they never actually run concurrently against it.
 #[tokio::test]
+#[serial_test::file_serial(shelterbed_db)]
 async fn higher_vulnerability_referral_wins_over_one_that_arrived_first() {
     let pool = support::setup_pool().await;
     support::reset(&pool).await;

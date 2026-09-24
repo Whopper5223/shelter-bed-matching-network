@@ -51,15 +51,25 @@ spec:
               value: "0.0.0.0:50051"
             - name: RUST_LOG
               value: "info"
+          # Suspends the liveness/readiness checks below until the port is
+          # actually open. common::db::CONNECT_RETRY_BUDGET gives Postgres
+          # up to 60s to become reachable on a cold Kubernetes start (nothing
+          # else gates this pod on postgres's pod being ready); without this,
+          # the livenessProbe's default 3-failure threshold at periodSeconds
+          # 10 would kill the container around t=30-40s, well before that
+          # budget is exhausted, undercutting the retry it's meant to allow.
+          startupProbe:
+            tcpSocket:
+              port: 50051
+            periodSeconds: 3
+            failureThreshold: 30
           readinessProbe:
             tcpSocket:
               port: 50051
-            initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             tcpSocket:
               port: 50051
-            initialDelaySeconds: 10
             periodSeconds: 10
           resources:
             requests:

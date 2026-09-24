@@ -59,7 +59,7 @@ impl MatchingService for MatchingServiceImpl {
                 BedStatus::Reserved,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .await?;
+            .await;
         }
 
         match outcome {
@@ -71,7 +71,7 @@ impl MatchingService for MatchingServiceImpl {
                     BedStatus::Reserved,
                     chrono::Utc::now().timestamp_millis(),
                 )
-                .await?;
+                .await;
 
                 Ok(Response::new(proto::SubmitReferralResponse {
                     referral_id: result.referral_id.to_string(),

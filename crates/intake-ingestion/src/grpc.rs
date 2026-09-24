@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use common::proto::{self, intake_service_server::IntakeService};
+use common::proto::{self, intake_service_server::IntakeService, BedStatus};
 use prost::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use tonic::{Request, Response, Status};
@@ -29,6 +29,24 @@ impl IntakeService for IntakeServiceImpl {
             return Err(Status::invalid_argument(
                 "event_id, shelter_id, and bed_id are all required",
             ));
+        }
+
+        // A real intake terminal only ever reports one of these three
+        // transitions (see the proto's own doc comment on BedStatusEvent).
+        // `RESERVED` is a state matching-engine's allocator assigns
+        // internally, never one a terminal should be able to declare
+        // directly -- accepting it here would let a caller mark a bed
+        // reserved with no backing reservation row, silently pulling real
+        // capacity out of the matching pool. An unset/out-of-range status
+        // (proto3's default `BED_STATUS_UNSPECIFIED`) must also be rejected
+        // rather than silently treated as `AVAILABLE` downstream.
+        match event.status() {
+            BedStatus::Available | BedStatus::Occupied | BedStatus::Maintenance => {}
+            BedStatus::Unspecified | BedStatus::Reserved => {
+                return Err(Status::invalid_argument(
+                    "status must be one of AVAILABLE, OCCUPIED, or MAINTENANCE",
+                ));
+            }
         }
 
         let key = event.shelter_id.clone();

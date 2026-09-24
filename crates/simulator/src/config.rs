@@ -8,10 +8,24 @@ pub struct Config {
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Err(_) => default,
+        Ok(raw) => match raw.parse() {
+            Ok(value) => value,
+            Err(_) => {
+                // Distinguish "operator typo'd a malformed value" from
+                // "not set at all" -- silently falling back to the default
+                // in both cases would let a real config mistake go
+                // unnoticed.
+                tracing::warn!(
+                    key,
+                    value = raw,
+                    "not a valid value, using the default instead"
+                );
+                default
+            }
+        },
+    }
 }
 
 impl Config {

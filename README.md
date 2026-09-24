@@ -129,6 +129,16 @@ docker compose up -d postgres
 cargo test --workspace
 ```
 
+All four tests share one real Postgres instance with no per-test isolation
+beyond a region name, and each `tests/*.rs` file compiles to its own
+separate binary/process -- so they're annotated `#[file_serial]` (not the
+in-process-only `#[serial]`) to guarantee they never actually run
+concurrently against it, regardless of how `cargo test` schedules test
+binaries. The default `TEST_DATABASE_URL` also points at the same instance
+`docker compose`'s own Postgres service exposes (`localhost:5433`) -- don't
+run the test suite against a Postgres you're using for a live demo, since
+`reset()` truncates every table.
+
 ## Exactly-once-ish Kafka consumption
 
 - Events are keyed by `shelter_id`, so per-shelter ordering is preserved

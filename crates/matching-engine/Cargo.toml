@@ -24,3 +24,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+# file_locks: each tests/*.rs file compiles to its own binary/process, and
+# these tests all share one real Postgres database with no per-test
+# isolation (region-scoped only) -- plain #[serial] only serializes within
+# a single process, which wouldn't stop two different test binaries from
+# running concurrently against the same DB.
+serial_test = { version = "4.0.1", features = ["file_locks"] }

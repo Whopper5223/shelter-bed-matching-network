@@ -21,7 +21,10 @@ fn general_needs() -> ReferralNeeds {
 /// referral, or the very next allocation attempt on this bed hits the
 /// `reservations_bed_active_uq` partial unique index as a real error instead
 /// of proceeding.
+// See tests/priority.rs for why file_serial (cross-process) rather than
+// plain serial (in-process only) is needed here.
 #[tokio::test]
+#[serial_test::file_serial(shelterbed_db)]
 async fn a_no_show_releases_the_reservation_and_re_pends_the_referral() {
     let pool = support::setup_pool().await;
     support::reset(&pool).await;
@@ -88,6 +91,7 @@ async fn a_no_show_releases_the_reservation_and_re_pends_the_referral() {
 /// `maintenance` while reserved -- the referral shouldn't stay artificially
 /// `matched` to a bed that just went offline for an unknown duration.
 #[tokio::test]
+#[serial_test::file_serial(shelterbed_db)]
 async fn a_maintenance_hold_releases_the_reservation_and_re_pends_the_referral() {
     let pool = support::setup_pool().await;
     support::reset(&pool).await;

@@ -119,11 +119,14 @@ async fn resolve_final_outcome(
     pool: &PgPool,
     referral_id: Uuid,
 ) -> Result<SubmitOutcome, AppError> {
+    // 'checked_in' counts too, not just 'active': a referral whose bed was
+    // occupied (a normal check-in) in the moments between being matched and
+    // this re-check still holds that bed just as much as one still 'active'.
     let row: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT reservations.bed_id, beds.shelter_id
          FROM reservations
          JOIN beds ON beds.id = reservations.bed_id
-         WHERE reservations.referral_id = $1 AND reservations.status = 'active'",
+         WHERE reservations.referral_id = $1 AND reservations.status IN ('active', 'checked_in')",
     )
     .bind(referral_id)
     .fetch_optional(pool)

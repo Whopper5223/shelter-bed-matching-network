@@ -12,7 +12,10 @@ const REGION: &str = "test-region-concurrency";
 /// index on `reservations(bed_id) WHERE status='active'` exist to
 /// guarantee, together -- this test proves the pair actually holds under
 /// real concurrent load against real Postgres.
+// See tests/priority.rs for why file_serial (cross-process) rather than
+// plain serial (in-process only) is needed here.
 #[tokio::test]
+#[serial_test::file_serial(shelterbed_db)]
 async fn concurrent_referrals_never_double_book_a_bed() {
     let pool = support::setup_pool().await;
     support::reset(&pool).await;

@@ -32,19 +32,30 @@ pub async fn run() -> anyhow::Result<()> {
     let brokers = config.kafka_brokers.clone();
     let topic = config.kafka_topic.clone();
     let group_id = config.kafka_group_id.clone();
-    tokio::spawn(async move {
-        if let Err(err) = kafka_consumer::run(kafka_state, &brokers, &topic, &group_id).await {
-            tracing::error!(%err, "kafka consumer task exited");
-        }
-    });
+    let kafka_task =
+        tokio::spawn(
+            async move { kafka_consumer::run(kafka_state, &brokers, &topic, &group_id).await },
+        );
 
     let addr = config.grpc_addr.parse()?;
     tracing::info!(%addr, "matching-engine gRPC server listening");
 
-    Server::builder()
+    let grpc_server = Server::builder()
         .add_service(MatchingServiceServer::new(MatchingServiceImpl { state }))
-        .serve(addr)
-        .await?;
+        .serve(addr);
 
-    Ok(())
+    // Tie the process's lifetime to both halves of the system. Readiness/
+    // liveness probes here only check the gRPC TCP port, so a Kafka
+    // consumer that silently dies (its own startup retry budget exhausted,
+    // or an unrecoverable error) would otherwise leave the container
+    // reporting healthy forever while consuming zero events. Exiting
+    // instead makes that failure visible -- as a restart / CrashLoopBackOff
+    // -- rather than invisible.
+    tokio::select! {
+        result = grpc_server => result.map_err(anyhow::Error::from),
+        result = kafka_task => match result {
+            Ok(inner) => inner,
+            Err(join_err) => Err(join_err.into()),
+        },
+    }
 }
